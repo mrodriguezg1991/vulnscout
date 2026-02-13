@@ -38,7 +38,8 @@ show_help() {
   echo "  --spdx  <path>     path to the SPDX 2 or SPDX 3 SBOM file/archive"
   echo "  --cdx  <path>      path to the CycloneDX directory"
   echo "  --openvex  <path>      path to the OpenVEX JSON file"
-  echo "  --cve-check  <path>      path to the Yocto CVE check JSON file"
+  echo "  --cve-check  <path>      path to the Yocto CVE check JSON file
+  --cve-check-exclude-patched     do not parse cve_check vulnerabilities with patched status"
   echo ""
   echo "Non-interactive configuration:"
   echo "  --no_webui  Disable the web UI (default: enabled)"
@@ -81,6 +82,7 @@ CONTAINER_IMAGE="docker.io/sflinux/vulnscout:latest"
 VULNSCOUT_HTTP_PROXY=""
 VULNSCOUT_HTTPS_PROXY=""
 VULNSCOUT_NO_PROXY="localhost,127.0.0.1"
+VULNSCOUT_CVE_EXCLUDE_PATCHED="false"
 
 # Build version string
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
@@ -185,6 +187,10 @@ while [[ $# -gt 0 ]]; do
         echo "Error: --cve-check requires a value"
         exit 1
       fi
+      ;;
+    --cve-check-exclude-patched)
+      VULNSCOUT_CVE_EXCLUDE_PATCHED="true"
+      shift
       ;;
     --vulnscout_path)
       if [[ -n "$2" && ! "$2" =~ ^-- ]]; then
@@ -368,6 +374,11 @@ EOF
       - VULNSCOUT_VERSION=$VULNSCOUT_VERSION
 EOF
 
+    if [ -n "$(id -u)" ] && [ -n "$(id -g)" ]; then
+        echo "      - USER_UID=$(id -u)" >> "$YAML_FILE"
+        echo "      - USER_GID=$(id -g)" >> "$YAML_FILE"
+    fi
+
     if [ ! -z "$VULNSCOUT_FAIL_CONDITION" ]; then
         echo "      - INTERACTIVE_MODE=false" >> "$YAML_FILE"
         echo "      - FAIL_CONDITION=$VULNSCOUT_FAIL_CONDITION" >> "$YAML_FILE"
@@ -404,6 +415,26 @@ EOF
         fi
         echo "      - NO_PROXY=$VULNSCOUT_NO_PROXY" >> "$YAML_FILE"
     fi
+    if [ "$VULNSCOUT_CVE_EXCLUDE_PATCHED" == "true" ]; then
+        echo "      - CVE_CHECK_EXCLUDE_PATCHED=true" >> "$YAML_FILE"
+    fi
+
+    # Scan the provided report template for env("VAR") usage and pass those host env vars to container
+    if [ ! -z "$VULNSCOUT_TEMPLATE" ] && [ -f "$VULNSCOUT_PATH/templates/$VULNSCOUT_TEMPLATE" ]; then
+        # Extract all env("...") and env('...') variable names from the template
+        template_env_vars=$(grep -hoE 'env\s*\(\s*["\x27]([^"\x27]+)["\x27]' "$VULNSCOUT_PATH/templates/$VULNSCOUT_TEMPLATE" 2>/dev/null | \
+            sed -E "s/env\s*\(\s*[\"']([^\"']+)[\"']/\1/" | \
+            sort -u || true)
+        
+        for var_name in $template_env_vars; do
+            # Get the value from host environment
+            var_value="${!var_name:-}"
+            if [ ! -z "$var_value" ]; then
+                echo "      - VULNSCOUT_TPL_${var_name}=${var_value}" >> "$YAML_FILE"
+            fi
+        done
+    fi
+
     echo "Vulnscout Succeed: Docker Compose file set at $YAML_FILE"
 }
 
